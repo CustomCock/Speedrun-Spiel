@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speedrun 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #070a14; color: #e5e7eb; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  .box { position: absolute; background: rgba(2, 6, 23, 0.55); border-radius: 10px; padding: 8px 14px; backdrop-filter: blur(2px); }
+  #timer { top: 14px; left: 50%; transform: translateX(-50%); font: bold 34px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1px; min-width: 190px; text-align: center; }
+  #timer.done { color: #fbbf24; }
+  #left { top: 14px; left: 14px; width: 210px; }
+  #state { font-weight: bold; font-size: 15px; }
+  #bar { height: 10px; background: #374151; border-radius: 5px; margin: 7px 0 4px; overflow: hidden; }
+  #barfill { height: 100%; width: 0; background: #60a5fa; }
+  #speed { font-size: 12px; color: #9ca3af; }
+  #right { top: 14px; right: 14px; text-align: right; }
+  #best { font-weight: bold; font-size: 15px; }
+  #stats { font-size: 13px; color: #9ca3af; margin-top: 4px; }
+  #controls { bottom: 34px; left: 50%; transform: translateX(-50%); font-size: 12px; color: rgba(229,231,235,0.7); white-space: nowrap; padding: 6px 12px; }
+  #progress { position: absolute; left: 24px; right: 24px; bottom: 16px; height: 6px; background: rgba(55,65,81,0.9); border-radius: 3px; }
+  #progfill { height: 100%; width: 0; background: #4ade80; border-radius: 3px; }
+  #progdot { position: absolute; top: -4px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: #f9fafb; }
+  .tick { position: absolute; top: -3px; width: 2px; height: 12px; background: #9ca3af; }
+  #cross { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: rgba(255,255,255,0.85); box-shadow: 0 0 4px #000; }
+  #flash { position: absolute; inset: 0; background: #ef4444; opacity: 0; }
+  #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(2, 6, 23, 0.72); cursor: pointer; }
+  #overlay .panel { text-align: center; max-width: 760px; padding: 20px 30px; }
+  #overlay h1 { font-size: 56px; color: #fbbf24; margin: 0 0 12px; letter-spacing: 2px; }
+  #overlay p { font-size: 17px; line-height: 1.6; margin: 6px 0; }
+  #overlay .go { color: #4ade80; font-weight: bold; font-size: 20px; margin-top: 22px; }
+  #overlay .time { font: bold 46px ui-monospace, Menlo, monospace; color: #f9fafb; margin: 10px 0; }
+  #overlay .rec { color: #4ade80; font-weight: bold; font-size: 22px; }
+  kbd { background: #1f2937; border: 1px solid #4b5563; border-bottom-width: 3px; border-radius: 5px; padding: 1px 7px; font-family: inherit; font-size: 15px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div class="box" id="timer">0:00.00</div>
+  <div class="box" id="left"><div id="state">STEHEN</div><div id="bar"><div id="barfill"></div></div><div id="speed">0.0 m/s</div></div>
+  <div class="box" id="right"><div id="best">Bestzeit --:--.--</div><div id="stats">Tode 0 · Rutsch-Sprünge 0 · CP 1/1</div></div>
+  <div class="box" id="controls">WASD laufen · SHIFT sprinten · SPACE springen · C ducken / beim Sprinten rutschen · beim Rutschen springen = Rutsch-Sprung · R Neustart</div>
+  <div id="progress"><div id="progfill"></div><div id="progdot"></div></div>
+  <div id="cross"></div>
+  <div id="flash"></div>
+</div>
+<div id="overlay"><div class="panel" id="panel"></div></div>
+<script src="vendor/three.min.js"></script>
+<script>
+'use strict';
+// =====================================================================
+//  SPEEDRUN 3D – First-Person-Parkour
+//  Laufen, Sprinten, Springen, Ducken, Rutschen, Rutsch-Sprung
+//  Einheiten: Meter, Sekunden. Strecke verläuft entlang -Z.
+// =====================================================================
+
+// ---------- Physik-Konstanten ----------
+const G = 22, MAX_FALL = 30;
+const WALK = 4, SPRINT = 7, CROUCH_SPD = 2;
+const JUMP = 7.5;            // -> ca. 1.28 m hoch
+const CROUCH_JUMP = 5.5;     // -> ca. 0.69 m hoch
+const SLIDE_JUMP = 9.5;      // -> ca. 2.05 m hoch
+const SLIDE_V = 9;           // Start-Tempo beim Rutschen
+const SLIDE_FRICTION = 4.5;  // Abbremsen beim Rutschen (Rutsch ≈ 8 m)
+const SLIDE_MIN = 2.5;       // darunter endet der Rutsch
+const SLIDE_START_MIN = 5;   // Mindest-Tempo für einen Rutsch
+const SLIDE_JUMP_BOOST = 1.15, SLIDE_JUMP_MAXV = 10.5;
+const PR = 0.3, PH = 1.8, PHC = 0.9;   // Spieler-Halbbreite, Höhe stehend, Höhe geduckt
+const HW = 5;                // halbe Korridorbreite
+const LAVA_Y = -3;
+const COYOTE = 0.1, JUMP_BUFFER = 0.12, STEP = 1 / 120;
+
+// ---------- Level ----------
+function buildLevel() {
+  const L = { boxes: [], hazards: [], checkpoints: [], hints: [], finishD: 0, length: 0 };
+  let d = 0, s = 0;
+  const box = (d0, d1, y0, y1, kind, x0 = -HW, x1 = HW) => L.boxes.push({ x0, x1, y0, y1, z0: -d1, z1: -d0, kind });
+  const run = (len) => { const st = d; box(st, st + len, -1.5, 0, 'floor'); d += len; return st; };
+  const raised = (len, h) => { const st = d; box(st, st + len, -1.5, h, 'floor'); d += len; return st; };
+  const gap = (len) => { d += len; };
+  const wall = (at, h, thick = 0.8) => box(at, at + thick, 0, h, 'wall');
+  const tunnel = (at, len, clear = 1.1) => box(at, at + len, clear, clear + 4.5, 'bar');
+  const platform = (at, len, y) => box(at, at + len, y - 0.4, y, 'platform');
+  const hazard = (at, len) => L.hazards.push({ x0: -HW, x1: HW, y0: -0.2, y1: 0.06, z0: -(at + len), z1: -at });
+  const cp = (at) => L.checkpoints.push({ d: at });
+  const hint = (at, text) => L.hints.push({ d: at, text });
+
+  // 0: Start / Tutorial
+  s = run(40); cp(s + 2);
+  hint(s + 8, 'W A S D = laufen · SHIFT = sprinten · Maus = umsehen');
+  hint(s + 22, 'SPACE = springen');
+  wall(s + 33, 0.8, 0.6);
+  // 1: Lücken
+  s = run(10); gap(2.5);
+  s = run(10); hint(s + 3, 'Sprinten für weite Sprünge!'); gap(3.5);
+  s = run(10); gap(4.2);
+  s = run(8);
+  // 2: Tunnel (Ducken / Rutschen)
+  s = run(60); cp(s + 2);
+  hint(s + 5, 'C = ducken  –  beim SPRINTEN: RUTSCHEN!');
+  tunnel(s + 14, 4);
+  tunnel(s + 27, 5);
+  hazard(s + 37, 2);
+  hint(s + 43, 'Langer Tunnel: rutschen, dann ducken');
+  tunnel(s + 48, 12);
+  // 3: Hohe Wände (Rutsch-Sprung)
+  s = run(40); cp(s + 2);
+  hint(s + 5, 'Beim RUTSCHEN springen = höher & weiter!');
+  wall(s + 20, 1.7); wall(s + 34, 1.7);
+  // 4: Treppe hoch, Sprung runter
+  s = run(14); cp(s + 2); hint(s + 4, 'Hoch hinaus! (Rutsch-Sprung kürzt ab)');
+  const e = s + 14;
+  platform(e + 3, 4, 0.9); platform(e + 10, 4, 1.8); platform(e + 17, 4, 2.7);
+  gap(24);
+  s = raised(18, 2.7);
+  gap(5.5);
+  s = run(10);
+  // 5: Weite Lücken
+  s = run(14); cp(s + 2); hint(s + 4, 'Weite Lücken: Rutsch-Sprung!');
+  gap(5.5); s = run(12); gap(6); s = run(12); gap(6.5); s = run(12);
+  // 6: Gefahrenzonen
+  s = run(52); cp(s + 2); hint(s + 4, 'Rote Zonen = tödlich');
+  hazard(s + 8, 2); hazard(s + 16, 3); hazard(s + 24, 1.5); wall(s + 27, 0.8, 0.6);
+  tunnel(s + 33, 4); hazard(s + 39, 2.5);
+  hazard(s + 44, 4);
+  // 7: Abgrund mit Plattformen
+  s = run(10); cp(s + 2); hint(s + 3, 'Nicht in die Lava!');
+  const q = s + 10;
+  platform(q + 3, 3, 0.5); platform(q + 9, 3, 1.2); platform(q + 15, 3, 0.6); platform(q + 21, 3, 1.4);
+  gap(26);
+  s = run(10);
+  // 8: Tunnel -> Lücke (Timing)
+  s = run(21.5); cp(s + 2); hint(s + 4, 'Aus dem Tunnel rutschen und SOFORT springen!');
+  tunnel(s + 16, 4); gap(5);
+  s = run(13.5); tunnel(s + 8, 4); gap(5.2);
+  s = run(12);
+  // 9: Gefahr + Wand, Wandreihe
+  s = run(40); cp(s + 2); hint(s + 5, 'Rutsch-Sprung über Zone UND Wand');
+  hazard(s + 16, 1.5); wall(s + 17.5, 1.4);
+  wall(s + 28, 1.0, 0.6); wall(s + 34, 1.0, 0.6); wall(s + 40, 1.0, 0.6);
+  // 10: Finale
+  s = run(64); cp(s + 2); hint(s + 4, 'Endspurt!');
+  hazard(s + 10, 2); wall(s + 20, 0.8, 0.6); hazard(s + 30, 4); tunnel(s + 40, 4); hazard(s + 50, 2);
+  L.finishD = s + 58;
+
+  L.length = d;
+  // Seitenwände, Start- und Endwand
+  box(-2, d + 2, -1.5, 9, 'side', HW, HW + 1.5);
+  box(-2, d + 2, -1.5, 9, 'side', -HW - 1.5, -HW);
+  box(-2, 0, -1.5, 9, 'side');
+  box(d, d + 2, -1.5, 9, 'side');
+  return L;
+}
+const level = buildLevel();
+
+// ---------- Zustand ----------
+const player = { x: 0, y: 0, z: 0, h: PH, vx: 0, vy: 0, vz: 0, onGround: false, wasOnGround: false, state: 'normal',
+  coyote: 0, slideCd: 0, slideDx: 0, slideDz: -1, fx: 0, squash: 0 };
+let yaw = 0, pitch = 0;
+const keys = { fwd: false, back: false, left: false, right: false, sprint: false, crouch: false, jump: false };
+let jumpBuffer = 0;
+let started = false, finished = false, elapsed = 0, finalTime = 0, newRecord = false;
+let deaths = 0, slideJumps = 0, deadTimer = 0, checkpointIdx = 0, locked = false;
+let acc = 0, lastT = 0, flash = 0, shakeT = 0, bobT = 0, eyeH = PH - 0.2, roll = 0, fovKick = 0;
+let rec = [], ghost = null;
+let best = parseFloat(localStorage.getItem('speedrun3d.best') || 'NaN'); if (!isFinite(best)) best = null;
+try { ghost = JSON.parse(localStorage.getItem('speedrun3d.ghost') || 'null'); } catch (e) { ghost = null; }
+
+// ---------- Hilfsfunktionen ----------
+const approach = (v, t, a) => v < t ? Math.min(v + a, t) : Math.max(v - a, t);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const fmt = (t) => { const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s.toFixed(2).padStart(5, '0')}`; };
+function pbox(p, h = p.h) { return { x0: p.x - PR, x1: p.x + PR, y0: p.y, y1: p.y + h, z0: p.z - PR, z1: p.z + PR }; }
+const hit = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0 && a.z0 < b.z1 && a.z1 > b.z0;
+function nearBoxes(p) { const out = []; for (const b of level.boxes) if (b.z0 < p.z + 3 && b.z1 > p.z - 3) out.push(b); return out; }
+function freeBox(r) { for (const b of level.boxes) if (hit(r, b)) return false; return true; }
+
+// ---------- Haltung ----------
+function setCrouch() { player.h = PHC; player.state = 'crouch'; }
+function startSlide() {
+  const p = player;
+  const sp = Math.hypot(p.vx, p.vz);
+  if (sp > 0.5) { p.slideDx = p.vx / sp; p.slideDz = p.vz / sp; }
+  else { p.slideDx = -Math.sin(yaw); p.slideDz = -Math.cos(yaw); }
+  const v = Math.max(sp, SLIDE_V);
+  p.vx = p.slideDx * v; p.vz = p.slideDz * v;
+  p.h = PHC; p.state = 'slide';
+  sfx('slide');
+}
+function tryStand() {
+  const p = player;
+  if (freeBox(pbox(p, PH))) { p.h = PH; p.state = 'normal'; return true; }
+  p.h = PHC; p.state = 'crouch'; return false;
+}
+function endSlide() { player.state = 'crouch'; player.slideCd = 0.2; if (!keys.crouch) tryStand(); }
+
+// ---------- Physik-Schritt ----------
+function stepPlayer(dt) {
+  const p = player;
+  const iz = (keys.fwd ? 1 : 0) - (keys.back ? 1 : 0), ix = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+  let wx = 0, wz = 0;
+  if (ix || iz) {
+    const fx = -Math.sin(yaw), fz = -Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
+    wx = fx * iz + rx * ix; wz = fz * iz + rz * ix;
+    const n = Math.hypot(wx, wz); wx /= n; wz /= n;
+  }
+  const wish = !!(ix || iz);
+
+  p.coyote = p.onGround ? COYOTE : p.coyote - dt;
+  if (jumpBuffer > 0) jumpBuffer -= dt;
+  if (p.slideCd > 0) p.slideCd -= dt;
+  if (p.fx > 0) p.fx -= dt;
+  if (p.squash > 0) p.squash -= dt;
+
+  // Haltung: ducken / rutschen / aufstehen
+  if (p.state === 'slide') {
+    if (p.onGround) {
+      const sp = Math.hypot(p.vx, p.vz);
+      const nsp = approach(sp, 0, SLIDE_FRICTION * dt);
+      p.vx = p.slideDx * nsp; p.vz = p.slideDz * nsp;
+    }
+    if (!keys.crouch || Math.hypot(p.vx, p.vz) < SLIDE_MIN || (!p.onGround && p.coyote <= 0)) endSlide();
+  } else if (keys.crouch) {
+    // Ducken nur ohne Sprint – mit Sprint (und Tempo) wird daraus ein Rutsch.
+    if (p.state === 'normal' && p.onGround && keys.sprint && Math.hypot(p.vx, p.vz) >= SLIDE_START_MIN && p.slideCd <= 0) startSlide();
+    else if (p.state === 'normal') setCrouch();
+  } else if (p.state === 'crouch') {
+    tryStand();
+  }
+
+  // Springen
+  if (jumpBuffer > 0 && (p.onGround || p.coyote > 0)) {
+    jumpBuffer = 0; p.coyote = 0; p.onGround = false;
+    if (p.state === 'slide') {
+      const sp = Math.min(Math.hypot(p.vx, p.vz) * SLIDE_JUMP_BOOST, SLIDE_JUMP_MAXV);
+      p.vx = p.slideDx * sp; p.vz = p.slideDz * sp; p.vy = SLIDE_JUMP;
+      p.state = 'crouch'; p.slideCd = 0;
+      if (!keys.crouch) tryStand();
+      p.fx = 0.6; fovKick = 1; slideJumps++;
+      sfx('slidejump');
+    } else if (p.state === 'crouch') { p.vy = CROUCH_JUMP; sfx('jump'); }
+    else { p.vy = JUMP; sfx('jump'); }
+  }
+
+  // Horizontale Bewegung
+  if (p.state !== 'slide') {
+    const maxSpd = p.state === 'crouch' ? CROUCH_SPD : (keys.sprint ? SPRINT : WALK);
+    const tx = wx * maxSpd, tz = wz * maxSpd;
+    const sp = Math.hypot(p.vx, p.vz);
+    let a;
+    if (p.onGround) a = wish ? 40 : 45;
+    else if (wish && sp > maxSpd && (p.vx * wx + p.vz * wz) > 0) a = 1.5;   // Schwung aus dem Rutsch-Sprung bleibt
+    else if (wish) a = 14;
+    else a = 2;
+    const dx = tx - p.vx, dz = tz - p.vz, dn = Math.hypot(dx, dz);
+    if (dn > 0) { const k = Math.min(1, a * dt / dn); p.vx += dx * k; p.vz += dz * k; }
+  }
+
+  // Gravitation
+  p.vy = Math.max(p.vy - G * dt, -MAX_FALL);
+
+  // Bewegung + Kollision (Achsen getrennt)
+  const near = nearBoxes(p);
+  p.x += p.vx * dt;
+  for (const b of near) { const r = pbox(p); if (!hit(r, b)) continue; if (p.vx > 0) p.x = b.x0 - PR; else if (p.vx < 0) p.x = b.x1 + PR; p.vx = 0; }
+  p.z += p.vz * dt;
+  for (const b of near) { const r = pbox(p); if (!hit(r, b)) continue; if (p.vz > 0) p.z = b.z0 - PR; else if (p.vz < 0) p.z = b.z1 + PR; p.vz = 0; }
+  p.wasOnGround = p.onGround;
+  p.y += p.vy * dt; p.onGround = false;
+  for (const b of near) {
+    const r = pbox(p); if (!hit(r, b)) continue;
+    if (p.vy < 0) { p.y = b.y1; p.vy = 0; p.onGround = true; }
+    else if (p.vy > 0) { p.y = b.y0 - p.h; p.vy = 0; }
+  }
+  if (p.onGround && !p.wasOnGround) { p.squash = 0.15; sfx('land'); }
+
+  // Gefahren
+  const hr = { x0: p.x - PR + 0.08, x1: p.x + PR - 0.08, y0: p.y - 0.02, y1: p.y + p.h, z0: p.z - PR + 0.08, z1: p.z + PR - 0.08 };
+  for (const hz of level.hazards) if (hit(hr, hz)) { die(); return; }
+  if (p.y < LAVA_Y + 0.6) { die(); return; }
+
+  // Checkpoints & Ziel
+  const dist = -p.z;
+  for (let i = checkpointIdx + 1; i < level.checkpoints.length; i++) {
+    if (dist >= level.checkpoints[i].d) { checkpointIdx = i; activateArch(i); sfx('cp'); }
+  }
+  if (!finished && started && dist >= level.finishD) finish();
+}
+
+function die() { deaths++; deadTimer = 0.5; flash = 0.5; shakeT = 0.4; sfx('die'); }
+function respawn() {
+  const cp = level.checkpoints[checkpointIdx];
+  const p = player;
+  p.x = 0; p.z = -cp.d; p.y = 0; p.h = PH; p.vx = p.vy = p.vz = 0; p.state = 'normal'; p.onGround = true;
+  p.coyote = 0; p.slideCd = 0; p.fx = 0; p.squash = 0; jumpBuffer = 0;
+  yaw = 0; pitch = 0; eyeH = PH - 0.2;
+}
+function resetRun() {
+  started = false; finished = false; elapsed = 0; deaths = 0; slideJumps = 0; deadTimer = 0; newRecord = false;
+  checkpointIdx = 0; rec = []; flash = 0; acc = 0;
+  level.checkpoints.forEach((c, i) => setArch(i, false));
+  respawn();
+  timerEl.classList.remove('done');
+  updateOverlay();
+}
+function finish() {
+  finished = true; finalTime = elapsed; sfx('finish');
+  if (best === null || finalTime < best) {
+    best = finalTime; newRecord = true;
+    localStorage.setItem('speedrun3d.best', String(best));
+    try { localStorage.setItem('speedrun3d.ghost', JSON.stringify(rec)); ghost = rec.slice(); } catch (e) {}
+  }
+  timerEl.classList.add('done');
+  document.exitPointerLock();
+  updateOverlay();
+}
+
+// ---------- Eingabe ----------
+const canvas = document.getElementById('c');
+const overlay = document.getElementById('overlay'), panel = document.getElementById('panel');
+const KEYMAP = { KeyW: 'fwd', ArrowUp: 'fwd', KeyS: 'back', ArrowDown: 'back', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right',
+  ShiftLeft: 'sprint', ShiftRight: 'sprint', KeyC: 'crouch', Space: 'jump' };
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'KeyR') { e.preventDefault(); resetRun(); return; }
+  const k = KEYMAP[e.code]; if (!k) return;
+  e.preventDefault(); ensureAudio();
+  if (keys[k]) return;
+  keys[k] = true;
+  if (k === 'jump') jumpBuffer = JUMP_BUFFER;
+  if (locked && !started && !finished && (k === 'fwd' || k === 'back' || k === 'left' || k === 'right' || k === 'jump')) started = true;
+});
+window.addEventListener('keyup', (e) => {
+  const k = KEYMAP[e.code]; if (!k) return;
+  e.preventDefault(); keys[k] = false;
+  if (k === 'jump' && player.vy > 1.5) player.vy *= 0.55;   // variable Sprunghöhe
+});
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+document.addEventListener('mousemove', (e) => {
+  if (!locked) return;
+  yaw -= e.movementX * 0.0022;
+  pitch = clamp(pitch - e.movementY * 0.0022, -1.4, 1.4);
+});
+overlay.addEventListener('click', () => {
+  ensureAudio();
+  if (finished) resetRun();
+  canvas.requestPointerLock();
+});
+document.addEventListener('pointerlockchange', () => {
+  locked = document.pointerLockElement === canvas;
+  if (!locked) for (const k in keys) keys[k] = false;
+  updateOverlay();
+});
+function updateOverlay() {
+  if (finished) {
+    overlay.classList.remove('hidden');
+    panel.innerHTML = `<h1>ZIEL!</h1><div class="time">${fmt(finalTime)}</div>
+      <p>Tode: ${deaths} &nbsp;·&nbsp; Rutsch-Sprünge: ${slideJumps}</p><p>Bestzeit: ${fmt(best)}</p>
+      ${newRecord ? '<p class="rec">NEUER REKORD! Dein Geist läuft beim nächsten Versuch mit.</p>' : ''}
+      <p class="go">Klicken oder <kbd>R</kbd> = Nochmal</p>`;
+  } else if (!locked) {
+    overlay.classList.remove('hidden');
+    if (started) {
+      panel.innerHTML = `<h1>PAUSE</h1><p>Zeit: ${fmt(elapsed)}</p><p class="go">Klicken zum Weiterspielen</p>`;
+    } else {
+      panel.innerHTML = `<h1>SPEEDRUN 3D</h1>
+        <p>Lauf den Korridor so schnell wie möglich bis zum Ziel.</p>
+        <p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> laufen &nbsp; <kbd>Maus</kbd> umsehen &nbsp; <kbd>SHIFT</kbd> sprinten &nbsp; <kbd>SPACE</kbd> springen</p>
+        <p><kbd>C</kbd> ducken – Ducken geht nur ohne Sprint.<br>Beim Sprinten ducken = <b>RUTSCHEN</b> (passt unter Tunnel).<br>Beim Rutschen springen = <b>RUTSCH-SPRUNG</b>: höher und weiter!</p>
+        <p>Rote Zonen und Lava = zurück zum Checkpoint, die Uhr läuft weiter.<br>Die Zeit startet mit deiner ersten Bewegung.</p>
+        <p class="go">Klicken zum Starten</p>`;
+    }
+  } else overlay.classList.add('hidden');
+}
+
+// ---------- Sound ----------
+let audio = null;
+function ensureAudio() {
+  if (audio) { if (audio.state === 'suspended') audio.resume(); return; }
+  try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; }
+}
+function sfx(kind) {
+  if (!audio) return;
+  const t = audio.currentTime, o = audio.createOscillator(), g = audio.createGain();
+  o.connect(g); g.connect(audio.destination);
+  let f0 = 440, f1 = 440, d = 0.1, type = 'square', vol = 0.05;
+  switch (kind) {
+    case 'jump': f0 = 300; f1 = 600; d = 0.12; break;
+    case 'land': f0 = 120; f1 = 80; d = 0.06; type = 'triangle'; vol = 0.03; break;
+    case 'slide': f0 = 220; f1 = 120; d = 0.18; type = 'sawtooth'; vol = 0.04; break;
+    case 'slidejump': f0 = 400; f1 = 900; d = 0.2; type = 'triangle'; vol = 0.07; break;
+    case 'die': f0 = 200; f1 = 40; d = 0.35; type = 'sawtooth'; vol = 0.08; break;
+    case 'cp': f0 = 660; f1 = 990; d = 0.15; type = 'triangle'; vol = 0.06; break;
+    case 'finish': f0 = 523; f1 = 1046; d = 0.6; type = 'triangle'; vol = 0.08; break;
+  }
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + d);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.start(t); o.stop(t + d + 0.02);
+}
+
+// ---------- 3D-Szene ----------
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+renderer.setSize(window.innerWidth, window.innerHeight);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b1026);
+scene.fog = new THREE.Fog(0x0b1026, 25, 130);
+const camera = new THREE.PerspectiveCamera(78, window.innerWidth / window.innerHeight, 0.05, 300);
+camera.rotation.order = 'YXZ';
+window.addEventListener('resize', () => { renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); });
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 1.0));
+const sun = new THREE.DirectionalLight(0xfff1d0, 0.9); sun.position.set(6, 14, 4); scene.add(sun);
+
+function canvasTex(w, h, draw, repeat = true) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  if (repeat) t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 4;
+  return t;
+}
+const gridTex = canvasTex(128, 128, (g, w, h) => { g.fillStyle = '#2b3040'; g.fillRect(0, 0, w, h); g.strokeStyle = '#414a60'; g.lineWidth = 4; g.strokeRect(2, 2, w - 4, h - 4); g.fillStyle = '#353b4d'; g.fillRect(60, 60, 8, 8); });
+const wallTex = canvasTex(128, 128, (g, w, h) => { g.fillStyle = '#4b5563'; g.fillRect(0, 0, w, h); g.fillStyle = '#3f4856'; for (let y = 0; y < h; y += 32) for (let x = (y / 32) % 2 ? 0 : 32; x < w; x += 64) g.fillRect(x + 2, y + 2, 60, 28); });
+const stripeTex = (c1, c2) => canvasTex(64, 64, (g, w, h) => { g.fillStyle = c1; g.fillRect(0, 0, w, h); g.fillStyle = c2; g.beginPath(); for (let i = -64; i < 128; i += 32) { g.moveTo(i, 0); g.lineTo(i + 16, 0); g.lineTo(i + 16 + 64, 64); g.lineTo(i + 64, 64); } g.fill(); });
+const hazardTex = stripeTex('#7f1d1d', '#ef4444'), barTex = stripeTex('#78350f', '#fbbf24');
+const checkerTex = canvasTex(64, 16, (g) => { for (let i = 0; i < 8; i++) for (let j = 0; j < 2; j++) { g.fillStyle = (i + j) % 2 ? '#111827' : '#f9fafb'; g.fillRect(i * 8, j * 8, 8, 8); } });
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 });
+
+function addBox(b) {
+  const sx = b.x1 - b.x0, sy = b.y1 - b.y0, sz = b.z1 - b.z0;
+  const geo = new THREE.BoxGeometry(sx, sy, sz);
+  let mat, edges = true;
+  if (b.kind === 'floor') {
+    const top = gridTex.clone(); top.needsUpdate = true; top.repeat.set(sx, sz);
+    const side = new THREE.MeshLambertMaterial({ color: 0x1f2532 });
+    mat = [side, side, new THREE.MeshLambertMaterial({ map: top }), side, side, side];
+  } else if (b.kind === 'side') {
+    const t = wallTex.clone(); t.needsUpdate = true; t.repeat.set(sz / 2, sy / 2);
+    const t2 = wallTex.clone(); t2.needsUpdate = true; t2.repeat.set(sx / 2, sy / 2);
+    mat = [new THREE.MeshLambertMaterial({ map: t }), new THREE.MeshLambertMaterial({ map: t }), new THREE.MeshLambertMaterial({ color: 0x374151 }), new THREE.MeshLambertMaterial({ color: 0x374151 }), new THREE.MeshLambertMaterial({ map: t2 }), new THREE.MeshLambertMaterial({ map: t2 })];
+    edges = false;
+  } else if (b.kind === 'wall') {
+    mat = new THREE.MeshLambertMaterial({ color: 0x8b95a5 });
+  } else if (b.kind === 'bar') {
+    const t = barTex.clone(); t.needsUpdate = true; t.repeat.set(sx / 2, sy / 2);
+    const plain = new THREE.MeshLambertMaterial({ color: 0x6b7280 });
+    const striped = new THREE.MeshLambertMaterial({ map: t });
+    mat = [plain, plain, plain, striped, striped, striped];
+  } else { // platform
+    mat = new THREE.MeshLambertMaterial({ color: 0xb45309 });
+  }
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, (b.z0 + b.z1) / 2);
+  scene.add(m);
+  if (edges) { const l = new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat); l.position.copy(m.position); scene.add(l); }
+}
+level.boxes.forEach(addBox);
+// Gefahrenzonen
+for (const hz of level.hazards) {
+  const sx = hz.x1 - hz.x0, sz = hz.z1 - hz.z0;
+  const t = hazardTex.clone(); t.needsUpdate = true; t.repeat.set(sx / 2, sz / 2);
+  const m = new THREE.Mesh(new THREE.BoxGeometry(sx, 0.08, sz), new THREE.MeshBasicMaterial({ map: t }));
+  m.position.set((hz.x0 + hz.x1) / 2, 0.04, (hz.z0 + hz.z1) / 2);
+  scene.add(m);
+}
+// Lava
+{
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(40, level.length + 40), new THREE.MeshBasicMaterial({ color: 0xd9341c }));
+  m.rotation.x = -Math.PI / 2; m.position.set(0, LAVA_Y, -level.length / 2); scene.add(m);
+  scene.fog.color.set(0x0b1026);
+}
+// Lampen an den Seitenwänden (Tempo-Gefühl)
+{
+  const lampGeo = new THREE.BoxGeometry(0.15, 0.7, 0.15), lampMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24 });
+  for (let d = 5; d < level.length; d += 8) for (const sgn of [-1, 1]) {
+    const m = new THREE.Mesh(lampGeo, lampMat); m.position.set(sgn * (HW - 0.08), 3, -d); scene.add(m);
+  }
+}
+// Text-Tafeln (Hinweise, Ziel)
+function textPlane(text, width, color = '#fde68a', bg = 'rgba(15,23,42,0.8)', size = 52) {
+  const c = document.createElement('canvas'), g = c.getContext('2d');
+  g.font = `bold ${size}px system-ui, sans-serif`;
+  const tw = Math.ceil(g.measureText(text).width);
+  c.width = tw + 48; c.height = size + 36;
+  g.font = `bold ${size}px system-ui, sans-serif`; g.textBaseline = 'middle';
+  g.fillStyle = bg; g.beginPath(); g.roundRect(0, 0, c.width, c.height, 18); g.fill();
+  g.fillStyle = color; g.fillText(text, 24, c.height / 2);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(width, width * c.height / c.width), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false }));
+  return m;
+}
+for (const h of level.hints) { const m = textPlane(h.text, Math.min(9, 0.3 * h.text.length)); m.position.set(0, 3.2, -h.d); scene.add(m); }
+// Checkpoint-Bögen
+const archMats = [];
+level.checkpoints.forEach((cp, i) => {
+  const mat = new THREE.MeshLambertMaterial({ color: 0x9ca3af }); archMats.push(mat);
+  const g = new THREE.Group();
+  for (const sgn of [-1, 1]) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.35, 4.2, 0.35), mat); m.position.set(sgn * (HW - 0.3), 2.1, 0); g.add(m); }
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(HW * 2, 0.35, 0.35), mat); beam.position.set(0, 4.2, 0); g.add(beam);
+  g.position.set(0, 0, -cp.d); scene.add(g);
+});
+function setArch(i, on) { archMats[i].color.set(on ? 0x22c55e : 0x9ca3af); archMats[i].emissive.set(on ? 0x14532d : 0x000000); }
+function activateArch(i) { setArch(i, true); }
+// Ziel
+{
+  const g = new THREE.Group();
+  const pm = new THREE.MeshLambertMaterial({ color: 0xf9fafb });
+  for (const sgn of [-1, 1]) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.4, 5, 0.4), pm); m.position.set(sgn * (HW - 0.3), 2.5, 0); g.add(m); }
+  const t = checkerTex.clone(); t.needsUpdate = true; t.repeat.set(3, 1);
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(HW * 2, 0.8, 0.5), new THREE.MeshBasicMaterial({ map: t })); beam.position.set(0, 5, 0); g.add(beam);
+  const txt = textPlane('ZIEL', 4, '#fbbf24', 'rgba(0,0,0,0)', 90); txt.position.set(0, 6.4, 0); g.add(txt);
+  g.position.set(0, 0, -level.finishD); scene.add(g);
+}
+// Geist
+const ghostMesh = new THREE.Mesh(new THREE.CapsuleGeometry(PR, PH - 2 * PR, 4, 12), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 }));
+ghostMesh.visible = false; scene.add(ghostMesh);
+
+// ---------- HUD ----------
+const timerEl = document.getElementById('timer'), stateEl = document.getElementById('state'), barEl = document.getElementById('barfill'),
+  speedEl = document.getElementById('speed'), bestEl = document.getElementById('best'), statsEl = document.getElementById('stats'),
+  progEl = document.getElementById('progfill'), dotEl = document.getElementById('progdot'), flashEl = document.getElementById('flash');
+{
+  const prog = document.getElementById('progress');
+  for (const cp of level.checkpoints) { const t = document.createElement('div'); t.className = 'tick'; t.style.left = (cp.d / level.finishD * 100) + '%'; prog.appendChild(t); }
+}
+function stateLabel() {
+  const p = player, sp = Math.hypot(p.vx, p.vz);
+  if (p.state === 'slide') return 'RUTSCHEN';
+  if (p.state === 'crouch') return p.onGround ? 'DUCKEN' : 'LUFT (geduckt)';
+  if (!p.onGround) return 'LUFT';
+  if (sp > WALK + 0.5) return 'SPRINT';
+  if (sp > 0.2) return 'LAUFEN';
+  return 'STEHEN';
+}
+function drawHUD() {
+  const sp = Math.hypot(player.vx, player.vz);
+  timerEl.textContent = fmt(finished ? finalTime : elapsed);
+  stateEl.textContent = stateLabel();
+  barEl.style.width = Math.min(100, sp / SLIDE_JUMP_MAXV * 100) + '%';
+  barEl.style.background = sp > SPRINT + 0.3 ? '#fbbf24' : sp > WALK + 0.3 ? '#22d3ee' : '#60a5fa';
+  speedEl.textContent = sp.toFixed(1) + ' m/s';
+  bestEl.textContent = 'Bestzeit ' + (best === null ? '--:--.--' : fmt(best));
+  statsEl.textContent = `Tode ${deaths} · Rutsch-Sprünge ${slideJumps} · CP ${checkpointIdx + 1}/${level.checkpoints.length}`;
+  const prog = clamp(-player.z / level.finishD, 0, 1) * 100;
+  progEl.style.width = prog + '%'; dotEl.style.left = prog + '%';
+  flashEl.style.opacity = flash > 0 ? (flash / 0.5 * 0.45) : 0;
+}
+
+// ---------- Update / Kamera ----------
+function update(dt) {
+  if (finished || !locked) return;
+  if (deadTimer > 0) {
+    deadTimer -= dt; if (started) elapsed += dt;
+    if (deadTimer <= 0) respawn();
+    return;
+  }
+  if (started) {
+    elapsed += dt;
+    const want = Math.floor(elapsed * 30) + 1;
+    while (rec.length < want) rec.push([+player.x.toFixed(2), +player.y.toFixed(2), +player.z.toFixed(2), player.h]);
+  }
+  acc += dt; let n = 0;
+  while (acc >= STEP && n < 10) { stepPlayer(STEP); acc -= STEP; n++; if (deadTimer > 0 || finished) { acc = 0; break; } }
+}
+function updateCamera(dt) {
+  const p = player, sp = Math.hypot(p.vx, p.vz);
+  if (flash > 0) flash -= dt;
+  if (shakeT > 0) shakeT -= dt;
+  if (fovKick > 0) fovKick = Math.max(0, fovKick - dt * 2.5);
+  eyeH += ((p.h - 0.2) - eyeH) * Math.min(1, dt * 14);
+  let by = 0, bx = 0;
+  if (p.onGround && sp > 0.5 && p.state !== 'slide') { bobT += dt * (4 + sp * 1.6); const k = Math.min(1, sp / SPRINT); by = Math.sin(bobT) * 0.045 * k; bx = Math.cos(bobT / 2) * 0.02 * k; }
+  if (p.squash > 0) by -= (p.squash / 0.15) * 0.12;
+  const targetRoll = p.state === 'slide' && p.onGround ? 0.07 : 0;
+  roll += (targetRoll - roll) * Math.min(1, dt * 10);
+  if (shakeT > 0) { bx += (Math.random() - 0.5) * 0.08 * shakeT; by += (Math.random() - 0.5) * 0.08 * shakeT; }
+  const rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  camera.position.set(p.x + rx * bx, p.y + eyeH + by, p.z + rz * bx);
+  camera.rotation.set(pitch, yaw, roll);
+  const fov = 78 + clamp(sp - WALK, 0, 7) * 1.6 + fovKick * 8;
+  if (Math.abs(camera.fov - fov) > 0.05) { camera.fov = fov; camera.updateProjectionMatrix(); }
+  // Geist
+  if (ghost && ghost.length && started && !finished) {
+    const gf = ghost[Math.min(ghost.length - 1, Math.floor(elapsed * 30))];
+    ghostMesh.visible = true;
+    ghostMesh.position.set(gf[0], gf[1] + gf[3] / 2, gf[2]);
+    ghostMesh.scale.y = gf[3] / PH;
+  } else ghostMesh.visible = false;
+}
+function frame(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  updateCamera(dt);
+  drawHUD();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+resetRun();
+requestAnimationFrame(frame);
+
+// Debug-Zugriff (Konsole): __game.level.length
+window.__game = { player, level, keys, get elapsed() { return elapsed; }, get finished() { return finished; }, get deaths() { return deaths; }, get locked() { return locked; },
+  get yaw() { return yaw; }, _debugUnlock() { locked = true; overlay.classList.add('hidden'); } };
+</script>
+</body>
+</html>
