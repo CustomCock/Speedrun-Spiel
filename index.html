@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CockFlip</title>
+    <style>
+      /* Schwarzer Hintergrund, Spiel zentriert, keine Scrollbalken */
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      body { display: flex; align-items: center; justify-content: center; }
+      /* "pixelated" = beim Vergrößern keine Weichzeichnung */
+      canvas { image-rendering: pixelated; display: block; cursor: default; }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

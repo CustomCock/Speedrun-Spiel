@@ -7,7 +7,8 @@
 import { BALANCE, COIN_PRICE, RARITY_WEIGHT, RELIC_PRICE, priceScale } from '../data/balance';
 import { addCoin, findCoin, removeCoinFromRun } from './state';
 import { COINS, RELICS, coinDef, relicDef } from './registry';
-import type { Rarity, Rng, RunState, ShopOffer } from './types';
+import type { Rarity, RunState, ShopOffer } from './types';
+import type { Rng } from './rng';
 
 export type UnlockCheck = (id: string) => boolean;
 

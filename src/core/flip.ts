@@ -13,7 +13,8 @@
 import { BALANCE } from '../data/balance';
 import { addCoin, drawHand, findCoin, removeCoinFromRun } from './state';
 import { bossDef, coinDef, relicDef } from './registry';
-import type { CoinDef, FlipCtx, FlipOutcome, LuckEvent, Rng, RunState } from './types';
+import type { CoinDef, FlipCtx, FlipOutcome, LuckEvent, RunState } from './types';
+import type { Rng } from './rng';
 
 /** Sind die Relikte gerade aktiv? (Boss "Pantomime" schaltet sie anfangs ab) */
 export function relicsActive(run: RunState): boolean {
